@@ -6,10 +6,7 @@ use Illuminate\Support\Facades\DB;
 
 class ReportsQueries
 {
-    // ══════════════════════════════════════════════════════
-    //  SHARED HELPERS
-    // ══════════════════════════════════════════════════════
-
+    // SHARED HELPERS (unchanged)
     public static function getAllCategories(): array
     {
         return DB::select('SELECT category_id, category_name FROM categories ORDER BY category_name ASC');
@@ -28,165 +25,93 @@ class ReportsQueries
         );
     }
 
-        // ══════════════════════════════════════════════════════
-        //  REPORT 1 – STOCK MOVEMENT (now includes expiry_date)
-        //  Admin only
-        // ══════════════════════════════════════════════════════
-
-        public static function getStockMovement(array $f = []): array
+    /**
+     * REPORT 1 – STOCK MOVEMENT
+     * Uses vw_stock_movement view and applies filters in PHP.
+     */
+    public static function getStockMovement(array $f = []): array
     {
-        $where  = ['1=1'];
-        $params = [];
+        $query = DB::table('vw_stock_movement');
 
         if (!empty($f['date_from'])) {
-            $where[]  = 'DATE(st.transaction_date) >= ?';
-            $params[] = $f['date_from'];
+            $query->whereDate('transaction_date', '>=', $f['date_from']);
         }
         if (!empty($f['date_to'])) {
-            $where[]  = 'DATE(st.transaction_date) <= ?';
-            $params[] = $f['date_to'];
+            $query->whereDate('transaction_date', '<=', $f['date_to']);
         }
         if (!empty($f['delivery_date_from'])) {
-            $where[]  = 'si.delivery_date >= ?';
-            $params[] = $f['delivery_date_from'];
+            $query->whereDate('delivery_date', '>=', $f['delivery_date_from']);
         }
         if (!empty($f['delivery_date_to'])) {
-            $where[]  = 'si.delivery_date <= ?';
-            $params[] = $f['delivery_date_to'];
+            $query->whereDate('delivery_date', '<=', $f['delivery_date_to']);
         }
         if (!empty($f['txn_type'])) {
-            $where[]  = 'st.transaction_type = ?';
-            $params[] = $f['txn_type'];
+            $query->where('transaction_type', $f['txn_type']);
         }
         if (!empty($f['category'])) {
-            $where[]  = 'c.category_id = ?';
-            $params[] = $f['category'];
+            $query->where('category_id', $f['category']);
         }
         if (!empty($f['supply'])) {
-            $where[]  = 's.supply_id = ?';
-            $params[] = $f['supply'];
+            $query->where('supply_id', $f['supply']);
         }
         if (!empty($f['user'])) {
-            $where[]  = 'st.user_id = ?';
-            $params[] = $f['user'];
+            $query->where('user_id', $f['user']);
         }
 
-        $w = implode(' AND ', $where);
-
-        $sql = "
-            SELECT 
-                st.transaction_id,
-                st.transaction_date,
-                st.transaction_type,
-                s.supply_name,
-                c.category_name,
-                st.quantity,
-                s.unit_measure,
-                CONCAT(u.first_name, ' ', u.last_name) AS performed_by,
-                sup.supplier_name,
-                si.cost,
-                si.receipt_no,
-                si.delivery_date,
-                si.expiry_date,
-                COALESCE(so.purpose, '') AS purpose,
-                so.remarks AS remarks,
-                so.approved_by,
-                so.approved_at
-            FROM stock_transactions st
-            INNER JOIN supplies s ON st.supply_id = s.supply_id
-            INNER JOIN categories c ON s.category_id = c.category_id
-            LEFT JOIN users u ON st.user_id = u.user_id
-            LEFT JOIN stock_ins si ON st.transaction_id = si.transaction_id AND st.transaction_type = 'stock_in'
-            LEFT JOIN suppliers sup ON si.supplier_id = sup.supplier_id
-            LEFT JOIN stock_outs so ON st.transaction_id = so.transaction_id AND st.transaction_type = 'stock_out'
-            WHERE {$w}
-            ORDER BY st.transaction_date DESC
-        ";
-
-        return DB::select($sql, $params);
+        return $query->orderBy('transaction_date', 'desc')->get()->toArray();
     }
 
-    // ══════════════════════════════════════════════════════
-    //  REPORT 2 – CURRENT INVENTORY (original, no expiry)
-    //  Admin + Staff
-    // ══════════════════════════════════════════════════════
-
+    /**
+     * REPORT 2 – CURRENT INVENTORY
+     * Uses vw_current_inventory view.
+     */
     public static function getCurrentInventory(array $f = []): array
     {
-        $where  = ["s.status != 'inactive'"];
-        $params = [];
+        $query = DB::table('vw_current_inventory');
 
         if (!empty($f['category'])) {
-            $where[]  = 's.category_id = ?';
-            $params[] = $f['category'];
+            $query->where('category_id', $f['category']);
         }
         if (!empty($f['stock_status'])) {
             match ($f['stock_status']) {
-                'sufficient'   => ($where[] = "s.current_stock > s.reorder_level AND s.current_stock > 0"),
-                'low_stock'    => ($where[] = "s.current_stock <= s.reorder_level AND s.current_stock > 0"),
-                'out_of_stock' => ($where[] = "s.current_stock = 0"),
+                'sufficient'   => $query->where('stock_alert', 'Sufficient'),
+                'low_stock'    => $query->where('stock_alert', 'Low Stock'),
+                'out_of_stock' => $query->where('stock_alert', 'Out of Stock'),
                 default        => null,
             };
         }
 
-        $w = implode(' AND ', $where);
-
-        return DB::select(
-            "SELECT s.supply_id, s.supply_name, c.category_name,
-                    s.unit_measure, s.current_stock, s.reorder_level,
-                    s.status AS supply_status,
-                    CASE 
-                        WHEN s.current_stock = 0 THEN 'Out of Stock'
-                        WHEN s.current_stock <= s.reorder_level THEN 'Low Stock'
-                        ELSE 'Sufficient'
-                    END AS stock_alert
-             FROM supplies s
-             JOIN categories c ON s.category_id = c.category_id
-             WHERE {$w}
-             ORDER BY s.current_stock ASC",
-            $params
-        );
+        return $query->orderBy('current_stock', 'asc')->get()->toArray();
     }
 
-    // ══════════════════════════════════════════════════════
-    //  REPORT 3 – LOW STOCK MONITORING
-    //  Admin + Staff
-    // ══════════════════════════════════════════════════════
-
+    /**
+     * REPORT 3 – LOW STOCK MONITORING
+     * Uses vw_low_stock_supplies view (same as TransactionsQueries).
+     */
     public static function getLowStockSupplies(array $f = []): array
     {
-        $where  = ["s.current_stock <= s.reorder_level", "s.status = 'active'"];
-        $params = [];
+        $query = DB::table('vw_low_stock_supplies');
 
         if (!empty($f['category'])) {
-            $where[]  = 's.category_id = ?';
-            $params[] = $f['category'];
+            $query->where('category_id', $f['category']);
         }
 
-        $w = implode(' AND ', $where);
+        $results = $query->orderBy('shortage_quantity', 'desc')->get();
 
-        return DB::select(
-            "SELECT s.supply_name, c.category_name, s.current_stock,
-                    s.reorder_level, s.unit_measure,
-                    (s.reorder_level - s.current_stock) AS shortage_quantity,
-                    CASE 
-                        WHEN s.current_stock = 0 THEN 'Out of Stock'
-                        WHEN s.current_stock <= s.reorder_level THEN 'Low Stock'
-                        ELSE 'Sufficient'
-                    END AS stock_status
-             FROM supplies s
-             JOIN categories c ON s.category_id = c.category_id
-             WHERE {$w}
-             ORDER BY shortage_quantity DESC",
-            $params
-        );
+        // Add stock_status column to match original return structure
+        return $results->map(function ($item) {
+            $item->stock_status = $item->current_stock == 0 ? 'Out of Stock' : 'Low Stock';
+            return $item;
+        })->toArray();
     }
 
-    // ══════════════════════════════════════════════════════
-    //  REPORT 4 – TOTAL PURCHASES PER SUPPLIER
-    //  Admin only
-    // ══════════════════════════════════════════════════════
-
+    /**
+     * REPORT 4 – TOTAL PURCHASES PER SUPPLIER (with optional date filter)
+     * Since aggregation is needed with date filtering, we use the base vw_purchases_per_supplier
+     * and then manually aggregate in PHP (or we could keep the original raw query for performance).
+     * For clarity, I'll keep the original efficient SQL query instead of a view, because views cannot accept date parameters.
+     * This is the only method that still uses raw SQL due to dynamic date aggregation.
+     */
     public static function getPurchasesPerSupplier(array $f = []): array
     {
         $where  = ['1=1'];
@@ -218,11 +143,13 @@ class ReportsQueries
         );
     }
 
-    // ══════════════════════════════════════════════════════
-    //  REPORT 5 – MOST CONSUMED SUPPLIES
-    //  Admin + Staff
-    // ══════════════════════════════════════════════════════
-
+    /**
+     * REPORT 5 – MOST CONSUMED SUPPLIES
+     * Uses vw_most_consumed_supplies view, but needs date/user/category filters.
+     * Since the view is pre-aggregated, we cannot apply date filters after aggregation.
+     * Therefore we keep the original raw query for this report as well.
+     * (Alternatively, we could create a more detailed view without aggregation, but that would be less efficient.)
+     */
     public static function getMostConsumedSupplies(array $f = []): array
     {
         $where  = ["st.transaction_type = 'stock_out'"];
@@ -240,7 +167,6 @@ class ReportsQueries
             $where[]  = 's.category_id = ?';
             $params[] = $f['category'];
         }
-
         if (!empty($f['user_id'])) {
             $where[]  = 'st.user_id = ?';
             $params[] = $f['user_id'];

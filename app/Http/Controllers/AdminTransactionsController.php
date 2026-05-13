@@ -22,7 +22,6 @@ class AdminTransactionsController extends Controller
         $mostConsumed    = TransactionsQueries::getMostConsumedSupplies();
         $supplierSummary = TransactionsQueries::getSupplierPurchasesSummary();
 
-        // suppliers table has no status column — fetch all, ordered by name
         $suppliers = DB::select("
             SELECT supplier_id, supplier_name
             FROM suppliers
@@ -30,11 +29,7 @@ class AdminTransactionsController extends Controller
         ");
 
         return view('admin_transactions.index', compact(
-            'inventory',
-            'lowStock',
-            'mostConsumed',
-            'supplierSummary',
-            'suppliers'
+            'inventory', 'lowStock', 'mostConsumed', 'supplierSummary', 'suppliers'
         ));
     }
 
@@ -51,42 +46,29 @@ class AdminTransactionsController extends Controller
             'remarks'       => 'nullable|string|max:255',
         ]);
 
-        DB::beginTransaction();
+        $userId = Session::get('user_id');
+        if (!$userId) {
+            return redirect()->route('login');
+        }
+
         try {
-            DB::table('supplies')
-                ->where('supply_id', $request->supply_id)
-                ->increment('current_stock', $request->quantity);
-
-            $transactionId = DB::table('stock_transactions')->insertGetId([
-                'supply_id'        => $request->supply_id,
-                'user_id'          => Session::get('user_id'),
-                'transaction_date' => now(),
-                'quantity'         => $request->quantity,
-                'transaction_type' => 'stock_in',
-                'created_at'       => now(),
-                'updated_at'       => now(),
+            DB::statement('CALL sp_stock_in(?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+                $request->supply_id,
+                $userId,
+                $request->quantity,
+                $request->unit_cost,
+                $request->supplier_id ?? 0,
+                $request->expiry_date,
+                $request->receipt_no,
+                $request->delivery_date,
+                $request->remarks
             ]);
-
-            DB::table('stock_ins')->insert([
-                'transaction_id' => $transactionId,
-                'supplier_id'    => $request->supplier_id ?: null,
-                'delivery_date'  => $request->delivery_date ?? now()->toDateString(),
-                'cost'           => $request->unit_cost,
-                'expiry_date'    => $request->expiry_date ?: null,
-                'receipt_no'     => $request->receipt_no ?: null,
-                'created_at'     => now(),
-                'updated_at'     => now(),
-            ]);
-
-            DB::commit();
 
             return redirect()->route('admin.transactions.index')
-                ->with('success', "Stock In: +{$request->quantity} unit(s) of supply #{$request->supply_id} added.");
-
+                ->with('success', "Stock In: +{$request->quantity} units added.");
         } catch (\Exception $e) {
-            DB::rollBack();
             return redirect()->route('admin.transactions.index')
-                ->with('error', 'Stock In failed. Please try again.');
+                ->with('error', 'Stock In failed: ' . $e->getMessage());
         }
     }
 
@@ -99,60 +81,25 @@ class AdminTransactionsController extends Controller
             'remarks'   => 'nullable|string|max:255',
         ]);
 
-        $supply = DB::table('supplies')
-            ->where('supply_id', $request->supply_id)
-            ->first(['supply_id', 'supply_name', 'current_stock']);
-
-        if (!$supply) {
-            return redirect()->route('admin.transactions.index')
-                ->with('error', 'Supply not found.');
+        $userId = Session::get('user_id');
+        if (!$userId) {
+            return redirect()->route('login');
         }
 
-        if ($supply->current_stock <= 0) {
-            return redirect()->route('admin.transactions.index')
-                ->with('error', "\"{$supply->supply_name}\" is currently out of stock.");
-        }
-
-        if ($request->quantity > $supply->current_stock) {
-            return redirect()->route('admin.transactions.index')
-                ->with('error', "Cannot deduct {$request->quantity} unit(s). Only {$supply->current_stock} available for \"{$supply->supply_name}\".");
-        }
-
-        DB::beginTransaction();
         try {
-            DB::table('supplies')
-                ->where('supply_id', $request->supply_id)
-                ->decrement('current_stock', $request->quantity);
-
-            $transactionId = DB::table('stock_transactions')->insertGetId([
-                'supply_id'        => $request->supply_id,
-                'user_id'          => Session::get('user_id'),
-                'transaction_date' => now(),
-                'quantity'         => $request->quantity,
-                'transaction_type' => 'stock_out',
-                'created_at'       => now(),
-                'updated_at'       => now(),
+            DB::statement('CALL sp_stock_out(?, ?, ?, ?, ?)', [
+                $request->supply_id,
+                $userId,
+                $request->quantity,
+                $request->purpose,
+                $request->remarks
             ]);
-
-            DB::table('stock_outs')->insert([
-                'transaction_id' => $transactionId,
-                'approved_by'    => Session::get('user_id'),
-                'purpose'        => $request->purpose ?: null,
-                'remarks'        => $request->remarks ?: null,
-                'approved_at'    => now(),
-                'created_at'     => now(),
-                'updated_at'     => now(),
-            ]);
-
-            DB::commit();
 
             return redirect()->route('admin.transactions.index')
-                ->with('success', "Stock Out: -{$request->quantity} unit(s) of \"{$supply->supply_name}\" deducted.");
-
+                ->with('success', "Stock Out: -{$request->quantity} units deducted.");
         } catch (\Exception $e) {
-            DB::rollBack();
             return redirect()->route('admin.transactions.index')
-                ->with('error', 'Stock Out failed. Please try again.');
+                ->with('error', 'Stock Out failed: ' . $e->getMessage());
         }
     }
 
